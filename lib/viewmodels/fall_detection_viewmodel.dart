@@ -323,7 +323,7 @@ class FallDetectionViewModel extends ChangeNotifier {
       ) async {
     try {
       await p2pVM.sendBroadcastMessage(
-        "🚨 EMERGENCY ALERT: Fall detected! User may need help.",
+        " EMERGENCY ALERT: Fall detected! User may need help.",
         p2pVM.myId,
       );
       await p2pVM.sendBroadcastMessage(

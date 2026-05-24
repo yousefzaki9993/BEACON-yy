@@ -1,25 +1,27 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:typed_data';
+
 import 'package:beacon/model/data/UserProfile.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../model/data/Resource.dart';
-import '../model/service/notification_service.dart';
 import 'package:flutter_p2p_connection/flutter_p2p_connection.dart';
 import 'dart:async';
+import 'package:collection/collection.dart';
+
+import '../model/data/Resource.dart';
+import '../model/data/Message.dart';
+import '../model/data/Device.dart';
+import '../model/service/notification_service.dart';
 import '../model/service/p2p_service.dart';
 import '../model/service/connected_device_service.dart';
 import '../model/service/message_service.dart';
-import '../model/Device.helper.dart';
-import '../model/mapper/device_mapper.dart';
-import '../model/data/Message.dart';
-import '../model/data/Device.dart';
-import 'package:collection/collection.dart';
-
 import '../model/service/resource_service.dart';
 import '../model/service/user_profile_service.dart';
+import '../model/Device.helper.dart';
+import '../model/mapper/device_mapper.dart';
+import '../model/service/Encryptionservice.dart';
+import '../model/service/Integrityservice.dart';
+import '../model/service/KeyManagementService.dart';
 import 'ProfileViewModel.dart';
 
 class P2PViewModel extends ChangeNotifier {
@@ -28,11 +30,16 @@ class P2PViewModel extends ChangeNotifier {
   final P2PService _service = P2PService();
   final ConnectedDeviceDao _deviceDao = ConnectedDeviceDao();
   final MessageDao _messageDao = MessageDao();
-  get service => _service;
   final UserProfileDao userProfileDao = UserProfileDao();
   final ResourceDao _resourceDao = ResourceDao();
+  final EncryptionService _encryption = EncryptionService();
+  final IntegrityService _integrity = IntegrityService();
+  final KeyManagementService _keyManagement = KeyManagementService();
+
+  get service => _service;
 
   bool isHost = false;
+  bool _keyReady = false;
   List<P2pClientInfo> peers = [];
   String? activePeerId;
   List<Message> currentChatMessages = [];
@@ -49,10 +56,9 @@ class P2PViewModel extends ChangeNotifier {
   String owner = "";
 
   Future<void> initP2P(BuildContext context, bool newHost) async {
-    if(isActive && !isHost && !newHost) return;
-    if(isActive){
-      await disconnect(isHost);
-    }
+    if (isActive && !isHost && !newHost) return;
+    if (isActive) await disconnect(isHost);
+
     _service.ensurePermissions();
     _service.ensureServices();
 
@@ -63,11 +69,15 @@ class P2PViewModel extends ChangeNotifier {
 
   void startP2P(bool isHost) async {
     this.isHost = isHost;
+
     if (isHost) {
+      await _keyManagement.getOrCreateKey();
+      _keyReady = true;
       await _service.initHost();
       _setupHostStreams();
       await _service.hostInterface.createGroup(advertise: true);
     } else {
+      _keyReady = false;
       await _service.initClient();
       _setupClientStreams();
       _startAutoScan();
@@ -77,7 +87,8 @@ class P2PViewModel extends ChangeNotifier {
   void _setupHostStreams() {
     _stateSub = _service.hostInterface.streamHotspotState().listen((state) {
       isActive = state.isActive;
-      connectionStatus = state.isActive ? "Hosting: ${state.ssid}" : "Hosting...";
+      connectionStatus =
+      state.isActive ? "Hosting: ${state.ssid}" : "Hosting...";
       notifyListeners();
     });
     _listenForPeers(true);
@@ -111,10 +122,10 @@ class P2PViewModel extends ChangeNotifier {
             "${joiner.username} has joined.",
             'client_channel');
         if (isHost) {
-          sendMessage("ID|${joiner.id}", joiner.id, isHost);
+          await _sendIdAndKey(joiner.id);
         }
         if (peers.isEmpty && !isHost) {
-          sendMessage("ID|${joiner.id}", joiner.id, isHost);
+          sendRawMessage("ID|${joiner.id}", joiner.id, isHost);
         }
       } else if (list.length < peers.length) {
         final leaver = peers.firstWhere(
@@ -126,10 +137,25 @@ class P2PViewModel extends ChangeNotifier {
             "${leaver.username} has left the network.",
             'client_channel');
       }
-
       peers = list;
       notifyListeners();
     });
+  }
+
+  Future<void> _sendIdAndKey(String clientId) async {
+    final keyBytes = await _keyManagement.exportKeyBytes();
+    final keyBase64 = base64Encode(keyBytes);
+    final msg = "IDKEY|$clientId|$keyBase64";
+    await _service.hostInterface.sendTextToClient(msg, clientId);
+  }
+
+  Future<void> sendRawMessage(
+      String text, String targetId, bool isHost) async {
+    if (isHost) {
+      await _service.hostInterface.sendTextToClient(text, targetId);
+    } else {
+      await _service.clientInterface.sendTextToClient(text, targetId);
+    }
   }
 
   void _listenForMessages(bool isHost) {
@@ -144,9 +170,25 @@ class P2PViewModel extends ChangeNotifier {
               'resource_channel');
         }
 
+      } else if (msg.startsWith("IDKEY|")) {
+        final parts = msg.split('|');
+        if (parts.length >= 3) {
+          final realId = parts[1];
+          final keyBase64 = parts[2];
+          myId = realId;
+          try {
+            final keyBytes = base64Decode(keyBase64);
+            await _keyManagement.importKey(keyBytes);
+            _keyReady = true;
+            debugPrint("[KEY] Shared key imported successfully");
+          } catch (e) {
+            debugPrint("[KEY] Failed to import shared key: $e");
+          }
+          await sendJoinPing();
+        }
+
       } else if (msg.startsWith("PROFILE_IMG|")) {
         final parts = msg.split('|');
-        // Format: PROFILE_IMG|peerId|name|base64data
         if (parts.length >= 4) {
           final peerId = parts[1];
           final peerName = parts[2];
@@ -165,17 +207,12 @@ class P2PViewModel extends ChangeNotifier {
         final parts = msg.split('|');
         String clientId = parts[1];
         String resources = parts.sublist(2).join('|');
-        if (isHost) {
-          SyncToClient(clientId, resources);
-        }
+        if (isHost) SyncToClient(clientId, resources);
 
       } else if (msg.startsWith("ID|")) {
         final parts = msg.split('|');
-        String realId = parts[1];
-        myId = realId;
-        if (!isHost) {
-          await sendJoinPing();
-        }
+        myId = parts[1];
+        if (!isHost) await sendJoinPing();
 
       } else if (msg.startsWith("SYNC|")) {
         final data = jsonDecode(msg.substring(5));
@@ -196,6 +233,55 @@ class P2PViewModel extends ChangeNotifier {
           debugPrint("[ERROR] Failed to parse resource ID for deletion: $e");
         }
 
+      } else if (msg.startsWith("ENC|")) {
+        if (!_keyReady) {
+          debugPrint("[DECRYPT] Key not ready yet — dropping message");
+          return;
+        }
+
+        final payload = msg.substring(4);
+        final model = _encryption.deserialize(payload);
+
+        if (model == null) {
+          debugPrint("[DECRYPT] Failed to deserialize message");
+          return;
+        }
+
+        if (!_integrity.verify(model)) {
+          debugPrint("[INTEGRITY] Message rejected — replay or timestamp invalid");
+          return;
+        }
+
+        final plainText = await _encryption.decrypt(model);
+
+        if (plainText == null) {
+          debugPrint("[DECRYPT] Auth tag verification failed — message tampered");
+          return;
+        }
+
+        final senderId = model.senderId;
+
+        Message newMessage = Message(
+          senderDeviceId: senderId,
+          receiverDeviceId: myId,
+          messageType: "text",
+          content: plainText,
+          timestamp: DateTime.now().toIso8601String(),
+          delivered: 1,
+        );
+
+        _messageDao.insertMessage(newMessage);
+        updateLastMessageSummary(senderId);
+
+        if (activePeerId != null) {
+          if (senderId == activePeerId ||
+              newMessage.receiverDeviceId == "ALL") {
+            await refreshMessages(activePeerId!);
+          }
+        }
+
+        NotificationService.showAlert("New Message", plainText, 'chat_channel');
+
       } else {
         List<String> parts = msg.split('|');
         String senderId = parts[0];
@@ -214,7 +300,8 @@ class P2PViewModel extends ChangeNotifier {
         updateLastMessageSummary(senderId);
 
         if (activePeerId != null) {
-          if (senderId == activePeerId || newMessage.receiverDeviceId == "ALL") {
+          if (senderId == activePeerId ||
+              newMessage.receiverDeviceId == "ALL") {
             await refreshMessages(activePeerId!);
           }
         }
@@ -234,44 +321,60 @@ class P2PViewModel extends ChangeNotifier {
         final target = devices.first;
         connectionStatus = "Auto-joining ${target.deviceName}...";
         notifyListeners();
-
         await _service.clientInterface.stopScan();
         _service.clientInterface.connectWithDevice(target);
-
         isConnecting = false;
       }
     });
   }
 
   Future<void> sendMessage(String text, String targetId, bool isHost) async {
-    bool ok = false;
-    if (!text.startsWith("ID|") && !text.startsWith("REQ:")) {
-      text = "$myId|$text";
+    final isSystem = text.startsWith("ID|") || text.startsWith("REQ:");
+
+    if (isSystem) {
+      await sendRawMessage(text, targetId, isHost);
+      return;
     }
 
-    if (isHost) {
-      ok = await _service.hostInterface.sendTextToClient(text, targetId);
+    final isImage = text.startsWith("IMG_BASE64|");
+    final isLocation = text.startsWith("LOC|");
+
+    if (!isImage) {
+      if (!_keyReady) {
+        debugPrint("[ENCRYPT] Key not ready — cannot send encrypted message");
+        return;
+      }
+
+      final encryptedModel = await _encryption.encrypt(text, myId);
+      final serialized = _encryption.serialize(encryptedModel);
+      final payload = "ENC|$serialized";
+
+      bool ok = false;
+      if (isHost) {
+        ok = await _service.hostInterface.sendTextToClient(payload, targetId);
+      } else {
+        ok = await _service.clientInterface.sendTextToClient(payload, targetId);
+      }
+
+      if (ok) {
+        Message newMessage = Message(
+          senderDeviceId: myId,
+          receiverDeviceId: targetId,
+          messageType: isLocation ? "location" : "text",
+          content: text,
+          timestamp: DateTime.now().toIso8601String(),
+          delivered: 0,
+        );
+        _messageDao.insertMessage(newMessage);
+        await refreshMessages(targetId);
+        updateLastMessageSummary(targetId);
+      }
     } else {
-      ok = await _service.clientInterface.sendTextToClient(text, targetId);
-    }
-
-    if (ok) {
-      if (!text.startsWith("ID|") && !text.startsWith("REQ:")) {
-        List<String> parts = text.split('|');
-        String content = parts.sublist(1).join('|');
-        if (!content.startsWith("IMG_BASE64|")) {
-          Message newMessage = Message(
-            senderDeviceId: myId,
-            receiverDeviceId: targetId,
-            messageType: "text",
-            content: content,
-            timestamp: DateTime.now().toIso8601String(),
-            delivered: 0,
-          );
-          _messageDao.insertMessage(newMessage);
-          await refreshMessages(targetId);
-          updateLastMessageSummary(targetId);
-        }
+      final fullText = "$myId|$text";
+      if (isHost) {
+        await _service.hostInterface.sendTextToClient(fullText, targetId);
+      } else {
+        await _service.clientInterface.sendTextToClient(fullText, targetId);
       }
     }
   }
@@ -347,17 +450,14 @@ class P2PViewModel extends ChangeNotifier {
     _msgSub?.cancel();
     _peerSub?.cancel();
     _stateSub?.cancel();
-
     final UserProfile? currentUser = await userProfileDao.getUserProfile();
     await _resourceDao.ClearResources(currentUser?.name ?? "");
-    debugPrint("--------------------------------[DEBUG] Disposing P2PViewModel+++++++++++++++++++++++++++++");
     super.dispose();
   }
 
   Future<void> disconnect(bool isHost) async {
     final UserProfile? currentUser = await userProfileDao.getUserProfile();
     await _resourceDao.ClearResources(currentUser?.name ?? "");
-    debugPrint("--------------------------------[DEBUG] Disposing P2PViewModel+++++++++++++++++++++++++++++");
 
     if (isHost) {
       await _service.hostInterface.removeGroup();
@@ -375,6 +475,8 @@ class P2PViewModel extends ChangeNotifier {
     connectionStatus = "Disconnected";
     isHost = false;
     isConnecting = false;
+    _keyReady = false;
+    _integrity.reset();
 
     _msgSub?.cancel();
     _peerSub?.cancel();
@@ -391,30 +493,30 @@ class P2PViewModel extends ChangeNotifier {
       final List<dynamic> decoded = jsonDecode(resources_msg);
       final List<Resource> incomingResources =
       decoded.map((e) => Resource.fromMap(e)).toList();
-
       for (final resource in incomingResources) {
         await _resourceDao.addResource(resource);
       }
-
-      debugPrint("[HOST] Synced ${incomingResources.length} resources from client $ClientID");
+      debugPrint(
+          "[HOST] Synced ${incomingResources.length} resources from client $ClientID");
       await sync_broadcast();
     } catch (e, stack) {
       debugPrint("[HOST][ERROR] Failed syncing resources: $e");
       debugPrint(stack.toString());
     }
-
     notifyListeners();
   }
 
   Future<void> sync_broadcast() async {
     final List<Resource> localResources = await _resourceDao.getAllResources();
-    String msg = "SYNC|${jsonEncode(localResources.map((r) => r.toMap()).toList())}";
+    String msg =
+        "SYNC|${jsonEncode(localResources.map((r) => r.toMap()).toList())}";
     sendBroadcast(msg);
   }
 
   Future<void> sendJoinPing() async {
     final List<Resource> localResources = await _resourceDao.getAllResources();
-    final String msg = "PR|$myId|${jsonEncode(localResources.map((r) => r.toMap()).toList())}";
+    final String msg =
+        "PR|$myId|${jsonEncode(localResources.map((r) => r.toMap()).toList())}";
     _service.clientInterface.broadcastText(msg);
   }
 
@@ -433,10 +535,16 @@ class P2PViewModel extends ChangeNotifier {
   }
 
   Future<void> sendBroadcastMessage(String text, String senderId) async {
+    if (!_keyReady) return;
+
+    final encryptedModel = await _encryption.encrypt(text, senderId);
+    final serialized = _encryption.serialize(encryptedModel);
+    final payload = "ENC|$serialized";
+
     if (isHost) {
-      await _service.hostInterface.broadcastText('${senderId}|${text}');
+      await _service.hostInterface.broadcastText(payload);
     } else {
-      await _service.clientInterface.broadcastText('${senderId}|${text}');
+      await _service.clientInterface.broadcastText(payload);
     }
 
     Message newMessage = Message(
@@ -457,35 +565,3 @@ class P2PViewModel extends ChangeNotifier {
     await sendBroadcast("REQ:${resource.owner}:$name");
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
