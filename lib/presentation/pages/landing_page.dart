@@ -1,11 +1,30 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../viewmodels/voice_viewmodel.dart';
+import '../../viewmodels/p2p_viewmodel.dart';
 import 'package:go_router/go_router.dart';
 
-class LandingPage extends StatelessWidget {
+import '../widgets/FloatingVoiceButton.dart';
+//final FlutterP2pHost hostInterface = FlutterP2pHost();
+//final FlutterP2pClient clientInterface = FlutterP2pClient();
+
+
+
+class LandingPage extends StatefulWidget {
   const LandingPage({super.key});
 
   @override
+  State<LandingPage> createState() => _LandingPageState();
+}
+
+class _LandingPageState extends State<LandingPage> {
+  //const LandingPage({super.key});
+
+  @override
   Widget build(BuildContext context) {
+    final voiceVM = Provider.of<VoiceViewModel>(context);
+    final p2pVM = Provider.of<P2PViewModel>(context);
+
     return Scaffold(
       body: Container(
         width: double.infinity,
@@ -29,11 +48,11 @@ class LandingPage extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 100.0),
                 child: Column(
                   children: [
-
-                     Image.asset(
+                    //might add logo laterrr
+                    Image.asset(
                       'assets/logo.png',
                       height: 150,
-                     ),
+                    ),
                     const SizedBox(height: 20),
                     const Text(
                       'BEACON',
@@ -63,11 +82,11 @@ class LandingPage extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Start as Host Button
                     ElevatedButton(
+                      key: const Key('start_button'),
                       onPressed: () {
-                        // الانتقال إلى صفحة Dashboard كناشر (Host)
-                        context.go('/dashboard/true');
+                        p2pVM.initP2P(context, true);
+                        context.goNamed('dashboard', pathParameters: {'isHost': '${p2pVM.isHost}'});
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.red,
@@ -87,16 +106,15 @@ class LandingPage extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 20),
-
-                    // Join as Client Button
                     ElevatedButton(
+                      key: const Key('join_button'),
                       onPressed: () {
-                        // الانتقال إلى صفحة Dashboard كعميل (Client)
-                        context.go('/dashboard/false');
+                        p2pVM.initP2P(context, false);
+                        context.goNamed('dashboard', pathParameters: {'isHost': '${p2pVM.isHost}'});
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color.fromARGB(255, 14, 15, 19),
-                        side: const BorderSide(color: Colors.white30, width: 2),
+                        backgroundColor: Color.fromARGB(255, 14, 15, 19),
+                        side: const BorderSide(color: Color.fromARGB(255, 14, 15, 19), width: 2),
                         padding: const EdgeInsets.symmetric(vertical: 18),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -115,23 +133,14 @@ class LandingPage extends StatelessWidget {
                 ),
               ),
 
-              // Voice Communication Button (اختياري)
               Padding(
                 padding: const EdgeInsets.only(bottom: 60.0),
                 child: Column(
                   children: [
-                    FloatingActionButton(
-                      backgroundColor: Colors.red,
-                      elevation: 4,
-                      onPressed: () {
-                        // وظيفة الاتصال الصوتي يمكن إضافتها لاحقاً
-                        _showVoiceDialog(context);
-                      },
-                      child: const Icon(Icons.mic, color: Colors.white, size: 32),
-                    ),
+                    Floatingvoicebutton(centre: true),
                     const SizedBox(height: 14),
-                    const Text(
-                      "Press to start voice communication",
+                    Text(
+                      voiceVM.isListening ? "Listening..." :"Press to start voice communication",
                       style: TextStyle(
                         color: Colors.white70,
                         fontSize: 14,
@@ -143,35 +152,6 @@ class LandingPage extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  void _showVoiceDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1A0000),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        title: const Text(
-          'Voice Communication',
-          style: TextStyle(color: Colors.white),
-        ),
-        content: const Text(
-          'Voice feature is coming soon!',
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-            ),
-            child: const Text('OK'),
-          ),
-        ],
       ),
     );
   }

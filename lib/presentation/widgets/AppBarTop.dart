@@ -17,6 +17,7 @@ class AppBarTop extends StatelessWidget implements PreferredSizeWidget{
     final isDark = themeProvider.isDarkMode;
 
     return AppBar(
+      key: const Key('app_bar'),
       backgroundColor: Colors.black,
       elevation: 0,
       title: Text(title,
@@ -25,13 +26,13 @@ class AppBarTop extends StatelessWidget implements PreferredSizeWidget{
         IconButton(
           icon: Icon(
             isDark ? Icons.dark_mode : Icons.light_mode,
-            color: isDark ? Colors.yellow : Colors.black,
+            color: isDark ? Colors.yellow : Colors.blueGrey,
           ),
           onPressed: () {
             themeProvider.toggleTheme();
           },
         ),
-        Icon(Icons.settings, color: Colors.white),
+        //Icon(Icons.settings, color: Colors.white),
         SizedBox(width: 10),
       ],
     );

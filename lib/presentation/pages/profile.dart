@@ -1,6 +1,12 @@
-import 'package:beacon/presentation/widgets/NavigationBarBottom.dart';
-import 'package:beacon/presentation/widgets/AppBarTop.dart';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../viewmodels/ProfileViewModel.dart';
+import '../widgets/AppBarTop.dart';
+import '../widgets/NavigationBarBottom.dart';
+import '../widgets/FloatingVoiceButton.dart';
+import 'EditProfileDialog.dart';
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
@@ -10,209 +16,212 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
-  bool isEditing = false;
-
-  final TextEditingController nameController =
-  TextEditingController(text: "Abdalrahman Khaled");
-  final TextEditingController phoneController =
-  TextEditingController(text: "+201111732529");
-
-  final String deviceId = "BEA-001";
-
-  final List<Map<String, String>> contacts = [
-    {"name": "Omar", "id": "BEA-010"},
-    {"name": "Eslam", "id": "BEA-011"},
-    {"name": "Youssef", "id": "BEA-023"},
-  ];
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<ProfileViewModel>().loadProfile();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBarTop(title:"Profile"),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
+      appBar: AppBarTop(title: "User Profile"),
+      bottomNavigationBar: const NavigationBarBottom(currentIndex: 1),
+      floatingActionButton: Floatingvoicebutton(centre: false),
+      body: Consumer<ProfileViewModel>(
+        builder: (context, vm, _) {
+          if (!vm.hasProfile) {
+            return _emptyState(vm);
+          }
+          return _profileView(context, vm);
+        },
+      ),
+    );
+  }
+
+  Widget _profileView(BuildContext context, ProfileViewModel vm) {
+    final profile = vm.profile!;
+
+    return SingleChildScrollView(
+      physics: const BouncingScrollPhysics(),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24.0),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // --- Profile Image ---
+            const SizedBox(height: 40),
             Center(
-              child: Column(
+              child: Stack(
                 children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(80),
-                    child: Image(
-                      image : AssetImage("assets/pp.png"),
-                      height: 120,
-                      width: 120,
-                      fit: BoxFit.cover,
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                          color: Colors.redAccent.withOpacity(0.5), width: 2),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.redAccent.withOpacity(0.2),
+                          blurRadius: 20,
+                          spreadRadius: 5,
+                        )
+                      ],
+                    ),
+                    child: CircleAvatar(
+                      radius: 70,
+                      backgroundColor: const Color(0xFF1E1E1E),
+                      backgroundImage: vm.pickedImageFile != null
+                          ? FileImage(vm.pickedImageFile!)
+                          : (profile.imagePath.isNotEmpty
+                          ? FileImage(File(profile.imagePath))
+                          : const AssetImage("assets/pp.png"))
+                      as ImageProvider,
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10)),
-                      padding: const EdgeInsets.symmetric(
-                          vertical: 8, horizontal: 16),
+                  Positioned(
+                    bottom: 4,
+                    right: 4,
+                    child: GestureDetector(
+                      onTap: () async {
+                        await vm.pickImage();
+                        await vm.saveProfile();
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: const BoxDecoration(
+                          color: Colors.redAccent,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.camera_alt,
+                          color: Colors.white,
+                          size: 18,
+                        ),
+                      ),
                     ),
-                    onPressed: () {
-                      // Edit photo functionality later
-                    },
-                    child: const Text(
-                      "Edit Photo",
-                      style: TextStyle(color: Colors.white),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    "Device ID: BEA-001",
-                    style: const TextStyle(
-                        color: Colors.white70, fontWeight: FontWeight.bold),
                   ),
                 ],
               ),
             ),
-
-            const SizedBox(height: 25),
-
-            // --- Profile Fields ---
-            _buildField("Name", nameController),
-            _buildField("Phone Number", phoneController),
-
-            const SizedBox(height: 20),
-
+            const SizedBox(height: 24),
+            Text(
+              profile.name.toUpperCase(),
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.2,
+              ),
+            ),
+            const Text(
+              "Network Member",
+              style: TextStyle(
+                  color: Colors.redAccent,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500),
+            ),
+            const SizedBox(height: 32),
+            Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E1E),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: Column(
+                children: [
+                  _infoTile(Icons.phone, "Phone", profile.phone),
+                  const Divider(color: Colors.white10, height: 1, indent: 50),
+                  _infoTile(
+                      Icons.bloodtype, "Blood Group", profile.bloodType),
+                ],
+              ),
+            ),
+            const SizedBox(height: 40),
             SizedBox(
               width: double.infinity,
-              child: ElevatedButton(
+              height: 55,
+              child: ElevatedButton.icon(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red,
+                  foregroundColor: Colors.white,
                   shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10)),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
+                      borderRadius: BorderRadius.circular(15)),
+                  elevation: 0,
                 ),
-                onPressed: () {
-                  setState(() {
-                    isEditing = !isEditing;
-                  });
-                },
-                child: Text(
-                  isEditing ? "Save Changes" : "Update",
-                  style: const TextStyle(color: Colors.white),
+                icon: const Icon(Icons.edit, size: 18),
+                onPressed: () => showDialog(
+                  context: context,
+                  builder: (_) => const EditProfileDialog(),
                 ),
-              ),
-            ),
-
-            const SizedBox(height: 25),
-
-            // --- Contacts Header + Add Button ---
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  "Contacts",
+                label: const Text(
+                  "EDIT PROFILE",
                   style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold),
+                      fontWeight: FontWeight.bold, letterSpacing: 1.1),
                 ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10)),
-                    padding:
-                    const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                  ),
-                  onPressed: () {
-                    // Add contact functionality later
-                  },
-                  child: const Text(
-                    "Add Contact",
-                    style: TextStyle(color: Colors.white),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 10),
-
-            // --- Contacts List ---
-            Expanded(
-              child: ListView.builder(
-                itemCount: contacts.length,
-                itemBuilder: (context, i) {
-                  final contact = contacts[i];
-                  return Container(
-                    margin: const EdgeInsets.symmetric(vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[900],
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: ListTile(
-                      title: Text(
-                        contact["name"]!,
-                        style: const TextStyle(
-                            color: Colors.white, fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: Text(
-                        "ID: ${contact["id"]}",
-                        style: const TextStyle(color: Colors.grey),
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            onPressed: () {
-                              // Edit functionality later
-                            },
-                            icon: const Icon(Icons.edit, color: Colors.white),
-                          ),
-                          IconButton(
-                            onPressed: () {
-                              // Remove functionality later
-                            },
-                            icon:
-                            const Icon(Icons.delete, color: Colors.redAccent),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
               ),
             ),
+            const SizedBox(height: 20),
           ],
         ),
       ),
-      bottomNavigationBar: NavigationBarBottom(currentIndex: 1,)
     );
   }
 
-  Widget _buildField(String label, TextEditingController controller) {
+  Widget _infoTile(IconData icon, String label, String value) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: TextField(
-        controller: controller,
-        enabled: isEditing,
-        style: const TextStyle(color: Colors.white),
-        decoration: InputDecoration(
-          labelText: label,
-          labelStyle: const TextStyle(color: Colors.white70),
-          disabledBorder: OutlineInputBorder(
-            borderSide: const BorderSide(color: Colors.grey),
-            borderRadius: BorderRadius.circular(10),
+      padding: const EdgeInsets.symmetric(vertical: 16.0, horizontal: 20.0),
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.white54, size: 22),
+          const SizedBox(width: 16),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label,
+                  style:
+                  const TextStyle(color: Colors.white38, fontSize: 12)),
+              Text(value,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500)),
+            ],
           ),
-          enabledBorder: OutlineInputBorder(
-            borderSide: const BorderSide(color: Colors.red),
-            borderRadius: BorderRadius.circular(10),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyState(ProfileViewModel vm) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.account_circle_outlined,
+              size: 80, color: Colors.white24),
+          const SizedBox(height: 16),
+          const Text("No profile found",
+              style: TextStyle(color: Colors.white70)),
+          const SizedBox(height: 24),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              padding:
+              const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            onPressed: () async {
+              await vm.saveProfile();
+            },
+            child: const Text("CREATE PROFILE",
+                style: TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.bold)),
           ),
-          focusedBorder: OutlineInputBorder(
-            borderSide: const BorderSide(color: Colors.red, width: 2),
-            borderRadius: BorderRadius.circular(10),
-          ),
-        ),
+        ],
       ),
     );
   }

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart'; 
+import 'package:provider/provider.dart';
+import '../../viewmodels/p2p_viewmodel.dart';
 
 class NavigationBarBottom extends StatelessWidget {
   const NavigationBarBottom({super.key, required this.currentIndex});
@@ -7,7 +9,9 @@ class NavigationBarBottom extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p2pVM = context.watch<P2PViewModel>();
     return BottomNavigationBar(
+      key: const Key('bottom_navigation_bar'),
       currentIndex: currentIndex,
       backgroundColor: Colors.black,
       selectedItemColor: Colors.red,
@@ -29,7 +33,7 @@ class NavigationBarBottom extends StatelessWidget {
       onTap: (index) {
         switch (index) {
           case 0:
-            context.go('/dashboard'); 
+            context.goNamed('dashboard', pathParameters: {'isHost': '${p2pVM.isHost}'}); 
             break;
           case 1:
             context.go('/profile');

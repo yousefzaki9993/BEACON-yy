@@ -1,690 +1,469 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter_p2p_connection/flutter_p2p_connection.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'peer.dart';
+import 'package:provider/provider.dart';
+
+import 'package:beacon/presentation/widgets/AppBarTop.dart';
+import 'package:beacon/presentation/widgets/NavigationBarBottom.dart';
+import 'package:beacon/presentation/widgets/FloatingVoiceButton.dart';
+
 import 'chat.dart';
+
+import '../../viewmodels/p2p_viewmodel.dart';
+import '../../viewmodels/fall_detection_viewmodel.dart';
+import '../../viewmodels/ProfileViewModel.dart';
+
+import '../../main.dart';
 
 class NetworkDashboardPage extends StatefulWidget {
   final bool isHost;
-  const NetworkDashboardPage({super.key, required this.isHost});
+
+  const NetworkDashboardPage({
+    super.key,
+    required this.isHost,
+  });
 
   @override
   State<NetworkDashboardPage> createState() => _NetworkDashboardPageState();
 }
 
 class _NetworkDashboardPageState extends State<NetworkDashboardPage> {
-  final FlutterP2pHost host = FlutterP2pHost();
-  final FlutterP2pClient client = FlutterP2pClient();
-
-  List<BleDiscoveredDevice> discoveredHosts = [];
-  List<Peer> peers = [];
-
-  String myName = '';
-  String? connectedHost;
-  bool registered = false;
-  bool isScanning = false;
-
-  StreamSubscription<String>? sub;
-  Timer? _handshakeTimer;
+  final Map<String, bool> _peerFallStatus = {};
+  final Map<String, Timer> _peerFallTimers = {};
+  bool _profileImageSent = false;
 
   @override
   void initState() {
     super.initState();
-    _init();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final p2pVM = context.read<P2PViewModel>();
+      final fallVM = context.read<FallDetectionViewModel>();
+      final profileVM = context.read<ProfileViewModel>();
+
+      await profileVM.loadProfile();
+
+      await fallVM.initialize(p2pVM);
+
+      p2pVM.addListener(() => _onP2PUpdate(p2pVM));
+    });
+  }
+
+  void _onP2PUpdate(P2PViewModel p2pVM) {
+    _checkForFallInLastMessages(p2pVM);
+    _trySendProfileImage(p2pVM);
+  }
+
+  Future<void> _trySendProfileImage(P2PViewModel p2pVM) async {
+    if (_profileImageSent) return;
+    if (!p2pVM.isActive) return;
+    if (p2pVM.myId == 'unknown-device') return;
+    if (p2pVM.peers.isEmpty) return;
+
+    final profileVM = context.read<ProfileViewModel>();
+
+    Uint8List? bytes;
+
+    if (profileVM.pickedImageFile != null) {
+      bytes = await profileVM.pickedImageFile!.readAsBytes();
+    } else if (profileVM.profile != null &&
+        profileVM.profile!.imagePath.isNotEmpty) {
+      final f = File(profileVM.profile!.imagePath);
+      if (await f.exists()) {
+        bytes = await f.readAsBytes();
+      }
+    }
+
+    if (bytes == null) return;
+
+    final name = profileVM.profile?.name ?? '';
+    await p2pVM.sendProfileImage(bytes, name);
+    _profileImageSent = true;
+  }
+
+  void _checkForFallInLastMessages(P2PViewModel p2pVM) {
+    bool changed = false;
+
+    p2pVM.lastMessages.forEach((peerId, msg) {
+      if (msg == null) return;
+      if (msg.senderDeviceId == p2pVM.myId) return;
+
+      if (msg.content.contains("FALL_DETECTED") &&
+          _peerFallStatus[peerId] != true) {
+        _peerFallStatus[peerId] = true;
+        changed = true;
+
+        _peerFallTimers[peerId]?.cancel();
+        _peerFallTimers[peerId] = Timer(const Duration(minutes: 1), () {
+          if (mounted) {
+            setState(() {
+              _peerFallStatus[peerId] = false;
+            });
+          }
+          _peerFallTimers.remove(peerId);
+        });
+      }
+    });
+
+    if (changed && mounted) setState(() {});
   }
 
   @override
   void dispose() {
-    sub?.cancel();
-    _handshakeTimer?.cancel();
+    for (final timer in _peerFallTimers.values) {
+      timer.cancel();
+    }
     super.dispose();
   }
 
-  Future<void> _init() async {
-    await [
-      Permission.location,
-      Permission.bluetooth,
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      Permission.nearbyWifiDevices,
-    ].request();
-
-    await host.initialize();
-    await client.initialize();
-
-    if (widget.isHost) {
-      myName = 'HOST';
-      await host.createGroup(advertise: true);
-      sub = host.streamReceivedTexts().listen(_onMessage);
-    } else {
-      myName = 'Client-${DateTime.now().millisecondsSinceEpoch % 10000}';
-      setState(() => isScanning = true);
-      client.startScan((d) {
-        setState(() {
-          discoveredHosts = d;
-          isScanning = false;
-        });
-      });
-      sub = client.streamReceivedTexts().listen(_onMessage);
+  Widget _peerAvatar(P2PViewModel p2pVM, String peerId, bool isHost) {
+    final imageBytes = p2pVM.peerProfileImages[peerId];
+    if (imageBytes != null) {
+      return CircleAvatar(
+        radius: 24,
+        backgroundImage: MemoryImage(imageBytes),
+      );
     }
-  }
-
-  void _onMessage(String msg) {
-    final p = msg.split('|');
-    final type = p[0];
-
-    if (type == 'HANDSHAKE' && widget.isHost) {
-      final name = p[1];
-      if (name == 'HOST') return;
-
-      if (!peers.any((e) => e.name == name)) {
-        setState(() => peers.add(Peer(name)));
-        _showNotification('New client connected: $name');
-      }
-
-      host.broadcastText('HANDSHAKE_ACK|HOST|$name|');
-      _broadcastPeers();
-    }
-
-    if (type == 'HANDSHAKE_ACK' && !widget.isHost) {
-      if (p[2] == myName) {
-        registered = true;
-        connectedHost = p[1];
-        _handshakeTimer?.cancel();
-
-        if (!peers.any((e) => e.name == connectedHost)) {
-          setState(() => peers.insert(0, Peer(connectedHost!)));
-        }
-        _showNotification('Connected to host successfully');
-      }
-    }
-
-    if (type == 'CLIENT_LIST' && !widget.isHost) {
-      final list = p[3];
-      setState(() {
-        peers = [
-          if (connectedHost != null) Peer(connectedHost!),
-          ...list.isEmpty
-              ? []
-              : list
-              .split(',')
-              .where((e) => e != myName)
-              .map((e) => Peer(e))
-        ];
-      });
-    }
-
-    if (type == 'CHAT_REQUEST') {
-      final from = p[1];
-      final to = p[2];
-      if (to == myName) _showChatRequest(from);
-    }
-
-    if (type == 'CHAT_ACCEPT') {
-      if (p[2] == myName) _openChat(p[1]);
-    }
-  }
-
-  void _broadcastPeers() {
-    final list = peers.map((e) => e.name).join(',');
-    host.broadcastText('CLIENT_LIST|HOST|ALL|$list');
-  }
-
-  void _sendHandshake() {
-    if (registered) return;
-    client.broadcastText('HANDSHAKE|$myName|HOST|');
-  }
-
-  Future<void> _connectToHost(BleDiscoveredDevice d) async {
-    await client.connectWithDevice(d);
-    setState(() => isScanning = true);
-
-    _handshakeTimer?.cancel();
-    _handshakeTimer = Timer.periodic(const Duration(seconds: 2), (t) {
-      if (registered) {
-        t.cancel();
-        setState(() => isScanning = false);
-      } else {
-        _sendHandshake();
-      }
-    });
-  }
-
-  void _showNotification(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.red[800],
-        behavior: SnackBarBehavior.floating,
-      ),
+    final peer = p2pVM.peers.firstWhere(
+          (p) => p.id == peerId,
+      orElse: () => p2pVM.peers.first,
     );
-  }
-
-  void _showChatRequest(String from) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: const Color(0xFF1A0000),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        title: const Text(
-          'Chat Request',
-          style: TextStyle(color: Colors.white),
-        ),
-        content: Text(
-          '$from wants to chat with you',
-          style: const TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            style: TextButton.styleFrom(
-              foregroundColor: Colors.white70,
-            ),
-            child: const Text('Reject'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              final msg = 'CHAT_ACCEPT|$myName|$from|';
-              widget.isHost
-                  ? host.broadcastText(msg)
-                  : client.broadcastText(msg);
-              _openChat(from);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
-            ),
-            child: const Text('Accept',
-              style: TextStyle(color: Colors.white),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _openChat(String peer) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ChattingPage(
-          peer: peer,
-          myName: myName,
-          isHost: widget.isHost,
-          host: host,
-          client: client,
+    final displayName = p2pVM.peerProfileNames[peerId] ?? peer.username;
+    final initial =
+    displayName.isNotEmpty ? displayName[0].toUpperCase() : '?';
+    return CircleAvatar(
+      radius: 24,
+      backgroundColor: isHost ? Colors.orange : Colors.red,
+      child: Text(
+        initial,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.bold,
+          fontSize: 18,
         ),
       ),
     );
-  }
-
-  void _startScan() {
-    if (!widget.isHost) {
-      setState(() => isScanning = true);
-      client.startScan((d) {
-        setState(() {
-          discoveredHosts = d;
-          isScanning = false;
-        });
-      });
-    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final p2pVM = context.watch<P2PViewModel>();
+    final profileVM = context.watch<ProfileViewModel>();
+
     return Scaffold(
-      body: SafeArea(
-        child: Container(
-          width: double.infinity,
-          height: double.infinity,
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [
-                Color.fromARGB(255, 14, 15, 19),
-                Color(0xFF1A0000),
-              ],
-            ),
-          ),
-          child: Column(
-            children: [
-              // App Bar
-              _buildAppBar(),
-
-              // Status Card
-              _buildStatusCard(),
-
-              // Nearby Hosts Section (for clients only)
-              if (!widget.isHost)
-                SizedBox(
-                  height: 130,
-                  child: _buildNearbyHostsSection(),
-                ),
-
-              // Network Members Section
-              Expanded(child: _buildNetworkSection()),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAppBar() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'BEACON NETWORK',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1.0,
-                ),
-              ),
-              Text(
-                widget.isHost ? 'Host Dashboard' : 'Client Dashboard',
-                style: const TextStyle(
-                  color: Colors.red,
-                  fontSize: 12,
-                ),
-              ),
-            ],
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration: BoxDecoration(
-              color: Colors.red.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.red),
-            ),
-            child: Text(
-              myName,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w500,
-                fontSize: 11,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatusCard() {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E1E1E).withOpacity(0.5),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Network Status',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 11,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: registered || widget.isHost
-                          ? Colors.green
-                          : Colors.red,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    registered || widget.isHost
-                        ? 'Connected'
-                        : 'Searching',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              const Text(
-                'Active Peers',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 11,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                '${peers.length}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildNearbyHostsSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Available Hosts',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              IconButton(
-                onPressed: _startScan,
-                icon: Icon(
-                  isScanning ? Icons.refresh : Icons.search,
-                  color: Colors.red,
-                  size: 18,
-                ),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-                tooltip: 'Scan for hosts',
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: discoveredHosts.isEmpty
-              ? Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+      backgroundColor: Colors.black,
+      appBar: AppBarTop(title: "Network Dashboard"),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Icon(
-                  Icons.wifi_find,
-                  color: Colors.white30,
-                  size: 28,
-                ),
-                const SizedBox(height: 6),
                 Text(
-                  isScanning ? 'Scanning...' : 'No hosts found',
-                  style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 11,
-                  ),
+                  "Connected: ${p2pVM.peers.length} Devices",
+                  style: const TextStyle(color: Colors.white),
                 ),
+                if (profileVM.profile != null)
+                  Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 18,
+                        backgroundColor: const Color(0xFF1E1E1E),
+                        backgroundImage: profileVM.pickedImageFile != null
+                            ? FileImage(profileVM.pickedImageFile!)
+                            : (profileVM.profile!.imagePath.isNotEmpty
+                            ? FileImage(
+                            File(profileVM.profile!.imagePath))
+                            : const AssetImage("assets/pp.png"))
+                        as ImageProvider,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        profileVM.profile!.name,
+                        style: const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
               ],
             ),
-          )
-              : ListView.builder(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            itemCount: discoveredHosts.length,
-            itemBuilder: (context, index) {
-              final hostDevice = discoveredHosts[index];
-              return _buildHostCard(hostDevice, index);
-            },
-          ),
-        ),
-      ],
-    );
-  }
+            const SizedBox(height: 10),
+            Text(
+              "Network Status: ${p2pVM.connectionStatus}",
+              style: const TextStyle(color: Colors.green),
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: ListView.builder(
+                itemCount: p2pVM.peers.length,
+                itemBuilder: (context, i) {
+                  final p = p2pVM.peers[i];
+                  final bool isFallDetected = _peerFallStatus[p.id] == true;
+                  final displayName =
+                      p2pVM.peerProfileNames[p.id] ?? p.username;
 
-  Widget _buildHostCard(BleDiscoveredDevice hostDevice, int index) {
-    String deviceName = hostDevice.deviceName ?? 'Unknown Host';
+                  final lastMsgObj = p2pVM.lastMessages[p.id];
+                  String lastSeenText = "Never";
+                  if (lastMsgObj != null) {
+                    final dt = DateTime.parse(lastMsgObj.timestamp);
+                    final diff = DateTime.now().difference(dt);
+                    if (diff.inMinutes < 1) {
+                      lastSeenText = "Just now";
+                    } else if (diff.inMinutes < 60) {
+                      lastSeenText = "${diff.inMinutes}m ago";
+                    } else {
+                      lastSeenText = "${diff.inHours}h ago";
+                    }
+                  }
 
-    String shortName = deviceName.length > 10
-        ? '${deviceName.substring(0, 8)}...'
-        : deviceName;
-
-    return Container(
-      width: 140,
-      height: 100,
-      margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFF2A0F0F),
-            Color(0xFF1A0000),
+                  return Container(
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[900],
+                      borderRadius: BorderRadius.circular(10),
+                      border: isFallDetected
+                          ? Border.all(color: Colors.red, width: 1.5)
+                          : null,
+                    ),
+                    child: ListTile(
+                      leading: _peerAvatar(p2pVM, p.id, p.isHost),
+                      title: Text(
+                        displayName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            p.isHost ? "Host" : "Client",
+                            style: const TextStyle(color: Colors.grey),
+                          ),
+                          Text(
+                            "Last seen: $lastSeenText",
+                            style: const TextStyle(color: Colors.grey),
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              Icon(
+                                isFallDetected
+                                    ? Icons.warning_amber_rounded
+                                    : Icons.check_circle_outline,
+                                size: 14,
+                                color: isFallDetected
+                                    ? Colors.red
+                                    : Colors.green,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                "AI Status: ${isFallDetected ? 'Fall Detected' : 'Normal'}",
+                                style: TextStyle(
+                                  color: isFallDetected
+                                      ? Colors.red
+                                      : Colors.green,
+                                  fontSize: 12,
+                                  fontWeight: isFallDetected
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      trailing: const Icon(
+                        Icons.chat_bubble_outline,
+                        color: Colors.red,
+                      ),
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ChattingPage(
+                              target: p,
+                              isHost: widget.isHost,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: MediaQuery.of(context).size.width * 0.7,
+              child: ElevatedButton(
+                key: const Key('Broadcast_button'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                onPressed: () => _showBroadcastDialog(context),
+                child: const Text(
+                  "Send Broadcast Message",
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            ),
           ],
         ),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.red.withOpacity(0.3)),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.router,
-                color: Colors.red,
-                size: 14,
-              ),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  shortName,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 11,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 1,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 1),
-          Text(
-            'Tap to connect',
-            style: TextStyle(
-              color: Colors.green[300],
-              fontSize: 9,
-            ),
-          ),
-          const SizedBox(height:5 ),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: () => _connectToHost(hostDevice),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(5),
-                ),
-                minimumSize: const Size(0, 24),
-              ),
-              child: const Text(
-                'Connect',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 10,
-                ),
-              ),
-            ),
-          ),
-        ],
+      floatingActionButton: Floatingvoicebutton(
+        centre: false,
+        onVoiceAction: (action) {
+          if (action == "broadcast") _showBroadcastDialog(context);
+        },
       ),
+      bottomNavigationBar: NavigationBarBottom(currentIndex: 0),
     );
   }
 
-  Widget _buildNetworkSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-          child: Text(
-            widget.isHost ? 'Connected Clients' : 'Network Members',
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-        Expanded(
-          child: Container(
-            margin: const EdgeInsets.symmetric(horizontal: 8),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.3),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: peers.isEmpty
-                ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    widget.isHost
-                        ? Icons.people_outline
-                        : Icons.devices_other,
-                    color: Colors.white30,
-                    size: 36,
-                  ),
-                  const SizedBox(height: 8),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    child: Text(
-                      widget.isHost
-                          ? 'Waiting for clients...'
-                          : 'No members in network',
-                      style: const TextStyle(
-                        color: Colors.white70,
-                        fontSize: 12,
+  void _showBroadcastDialog(BuildContext context) {
+    final TextEditingController msgController = TextEditingController();
+    final TextEditingController newMsgController = TextEditingController();
+    final p2pVM = context.read<P2PViewModel>();
+    final appState = context.read<MyAppState>();
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return Dialog(
+              backgroundColor: Colors.grey[900],
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14)),
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Broadcast Message",
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold),
                       ),
-                      textAlign: TextAlign.center,
-                    ),
+                      const SizedBox(height: 12),
+                      const Text("Shortcuts (Long press to delete)",
+                          style:
+                          TextStyle(color: Colors.grey, fontSize: 12)),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: appState.predefinedMessages.map((text) {
+                          return GestureDetector(
+                            onLongPress: () async {
+                              await appState.deletePredefinedMessage(text);
+                              setDialogState(() {});
+                            },
+                            child: ActionChip(
+                              backgroundColor: Colors.red.withOpacity(0.2),
+                              label: Text(text,
+                                  style: const TextStyle(
+                                      color: Colors.white, fontSize: 12)),
+                              onPressed: () => msgController.text = text,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: newMsgController,
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 13),
+                              decoration: const InputDecoration(
+                                hintText: "Add new shortcut...",
+                                hintStyle: TextStyle(color: Colors.grey),
+                                isDense: true,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.add_circle,
+                                color: Colors.green),
+                            onPressed: () async {
+                              if (newMsgController.text.trim().isNotEmpty) {
+                                await appState.addPredefinedMessage(
+                                    newMsgController.text.trim());
+                                newMsgController.clear();
+                                setDialogState(() {});
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                      const Divider(color: Colors.grey),
+                      TextField(
+                        controller: msgController,
+                        maxLines: 3,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: "Type your message...",
+                          hintStyle: const TextStyle(color: Colors.grey),
+                          filled: true,
+                          fillColor: Colors.black,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(context),
+                            child: const Text("Cancel",
+                                style: TextStyle(color: Colors.grey)),
+                          ),
+                          const SizedBox(width: 8),
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red,
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10)),
+                            ),
+                            onPressed: () async {
+                              final msg = msgController.text.trim();
+                              if (msg.isEmpty) return;
+                              await p2pVM.sendBroadcastMessage(
+                                  msg, p2pVM.myId);
+                              Navigator.pop(context);
+                            },
+                            child: const Text("Send",
+                                style: TextStyle(color: Colors.white)),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
-            )
-                : ListView.builder(
-              padding: const EdgeInsets.all(6),
-              itemCount: peers.length,
-              itemBuilder: (context, index) {
-                return _buildPeerCard(peers[index]);
-              },
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildPeerCard(Peer peer) {
-    final isHostPeer = peer.name == 'HOST' || peer.name == connectedHost;
-
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E1E1E).withOpacity(0.6),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: isHostPeer ? Colors.red.withOpacity(0.5) : Colors.transparent,
-        ),
-      ),
-      child: ListTile(
-        dense: true,
-        visualDensity: VisualDensity.compact,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-        leading: Container(
-          width: 32,
-          height: 32,
-          decoration: BoxDecoration(
-            color: isHostPeer ? Colors.red.withOpacity(0.2) : Colors.blue.withOpacity(0.2),
-            shape: BoxShape.circle,
-          ),
-          child: Icon(
-            isHostPeer ? Icons.router : Icons.person,
-            color: isHostPeer ? Colors.red : Colors.blue,
-            size: 16,
-          ),
-        ),
-        title: Text(
-          peer.name,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w500,
-            fontSize: 12,
-          ),
-        ),
-        subtitle: Text(
-          isHostPeer ? 'Network Host' : 'Network Peer',
-          style: TextStyle(
-            color: isHostPeer ? Colors.red : Colors.blue,
-            fontSize: 10,
-          ),
-        ),
-        trailing: Container(
-          width: 28,
-          height: 28,
-          decoration: BoxDecoration(
-            color: Colors.red.withOpacity(0.1),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: IconButton(
-            onPressed: () {
-              final msg = 'CHAT_REQUEST|$myName|${peer.name}|';
-              widget.isHost
-                  ? host.broadcastText(msg)
-                  : client.broadcastText(msg);
-            },
-            icon: const Icon(
-              Icons.chat_bubble_outline,
-              color: Colors.red,
-              size: 14,
-            ),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-            tooltip: 'Start Chat',
-          ),
-        ),
-      ),
+            );
+          },
+        );
+      },
     );
   }
 }

@@ -21,7 +21,7 @@ class DatabaseHelper {
     String? password = await secureStorage.read(key: 'db_key');
 
     if (password == null) {
-      password = DateTime.now().millisecondsSinceEpoch.toString();
+      password = "pass";
       await secureStorage.write(key: 'db_key', value: password);
     }
 
@@ -34,7 +34,7 @@ class DatabaseHelper {
     final password = await _getDbPassword();
 
     WidgetsFlutterBinding.ensureInitialized();
-
+    
     return await openDatabase(
       path,
       password: password,
@@ -51,10 +51,6 @@ class DatabaseHelper {
         name TEXT,
         phone TEXT,
         blood_type TEXT,
-        '''
-        //emergency_contact_name TEXT,
-        //emergency_contact_phone TEXT,
-        '''
         created_at TEXT,
         updated_at TEXT,
         image_path TEXT
@@ -63,13 +59,13 @@ class DatabaseHelper {
 
     await db.execute('''
       CREATE TABLE connected_devices (
-        id INTEGER PRIMARY KEY,
+        id TEXT PRIMARY KEY,
         device_id TEXT,
         name TEXT,
         last_seen TEXT,
         connection_status TEXT,
-        signal_strength INTEGER,
-        first_discovered TEXT
+        first_discovered TEXT,
+        is_connected INTEGER
       )
     ''');
 
@@ -77,22 +73,26 @@ class DatabaseHelper {
       CREATE TABLE messages (
         id INTEGER PRIMARY KEY,
         sender_device_id TEXT,
+        receiver_device_id TEXT,
         message_type TEXT,
         content TEXT,
         timestamp TEXT,
-        delivered INTEGER,
+        delivered INTEGER
       )
     ''');
 
     await db.execute('''
-      CREATE TABLE resource_requests (
+      CREATE TABLE resources (
         id INTEGER PRIMARY KEY,
         resource_type TEXT,
         quantity INTEGER,
         note TEXT,
         requester_id TEXT,
         status TEXT,
-        timestamp TEXT
+        timestamp TEXT,
+        owner TEXT,
+        is_requested INTEGER,
+        is_mine INTEGER
       )
     ''');
   }
