@@ -55,6 +55,8 @@ class P2PViewModel extends ChangeNotifier {
   StreamSubscription? _stateSub;
   String owner = "";
 
+  Future<void> Function()? onRequestProfileRebroadcast;
+
   Future<void> initP2P(BuildContext context, bool newHost) async {
     if (isActive && !isHost && !newHost) return;
     if (isActive) await disconnect(isHost);
@@ -121,9 +123,16 @@ class P2PViewModel extends ChangeNotifier {
             "Network Update",
             "${joiner.username} has joined.",
             'client_channel');
+
         if (isHost) {
           await _sendIdAndKey(joiner.id);
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (onRequestProfileRebroadcast != null) {
+            await onRequestProfileRebroadcast!();
+          }
+          await sendBroadcast("REQPROFILE|all");
         }
+
         if (peers.isEmpty && !isHost) {
           sendRawMessage("ID|${joiner.id}", joiner.id, isHost);
         }
@@ -168,6 +177,11 @@ class P2PViewModel extends ChangeNotifier {
               "Resource Request from ${msg.split(":")[2]}",
               msg.substring(4),
               'resource_channel');
+        }
+
+      } else if (msg.startsWith("REQPROFILE|")) {
+        if (onRequestProfileRebroadcast != null) {
+          await onRequestProfileRebroadcast!();
         }
 
       } else if (msg.startsWith("IDKEY|")) {

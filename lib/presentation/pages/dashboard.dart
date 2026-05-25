@@ -31,7 +31,7 @@ class NetworkDashboardPage extends StatefulWidget {
 class _NetworkDashboardPageState extends State<NetworkDashboardPage> {
   final Map<String, bool> _peerFallStatus = {};
   final Map<String, Timer> _peerFallTimers = {};
-  bool _profileImageSent = false;
+  bool _initialProfileSent = false;
 
   @override
   void initState() {
@@ -43,26 +43,18 @@ class _NetworkDashboardPageState extends State<NetworkDashboardPage> {
       final profileVM = context.read<ProfileViewModel>();
 
       await profileVM.loadProfile();
-
       await fallVM.initialize(p2pVM);
+
+      p2pVM.onRequestProfileRebroadcast = () async {
+        await _broadcastProfileImage(p2pVM, profileVM);
+      };
 
       p2pVM.addListener(() => _onP2PUpdate(p2pVM));
     });
   }
 
-  void _onP2PUpdate(P2PViewModel p2pVM) {
-    _checkForFallInLastMessages(p2pVM);
-    _trySendProfileImage(p2pVM);
-  }
-
-  Future<void> _trySendProfileImage(P2PViewModel p2pVM) async {
-    if (_profileImageSent) return;
-    if (!p2pVM.isActive) return;
-    if (p2pVM.myId == 'unknown-device') return;
-    if (p2pVM.peers.isEmpty) return;
-
-    final profileVM = context.read<ProfileViewModel>();
-
+  Future<void> _broadcastProfileImage(
+      P2PViewModel p2pVM, ProfileViewModel profileVM) async {
     Uint8List? bytes;
 
     if (profileVM.pickedImageFile != null) {
@@ -79,7 +71,22 @@ class _NetworkDashboardPageState extends State<NetworkDashboardPage> {
 
     final name = profileVM.profile?.name ?? '';
     await p2pVM.sendProfileImage(bytes, name);
-    _profileImageSent = true;
+  }
+
+  void _onP2PUpdate(P2PViewModel p2pVM) {
+    _checkForFallInLastMessages(p2pVM);
+    _trySendInitialProfileImage(p2pVM);
+  }
+
+  Future<void> _trySendInitialProfileImage(P2PViewModel p2pVM) async {
+    if (_initialProfileSent) return;
+    if (!p2pVM.isActive) return;
+    if (p2pVM.myId == 'unknown-device') return;
+    if (p2pVM.peers.isEmpty) return;
+
+    final profileVM = context.read<ProfileViewModel>();
+    await _broadcastProfileImage(p2pVM, profileVM);
+    _initialProfileSent = true;
   }
 
   void _checkForFallInLastMessages(P2PViewModel p2pVM) {
@@ -111,6 +118,8 @@ class _NetworkDashboardPageState extends State<NetworkDashboardPage> {
 
   @override
   void dispose() {
+    final p2pVM = context.read<P2PViewModel>();
+    p2pVM.onRequestProfileRebroadcast = null;
     for (final timer in _peerFallTimers.values) {
       timer.cancel();
     }
