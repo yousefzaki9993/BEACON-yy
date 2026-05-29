@@ -6,6 +6,7 @@ import 'package:beacon/presentation/pages/add_or_edit_resource_page.dart';
 import 'package:beacon/presentation/widgets/AppBarTop.dart';
 import 'package:beacon/presentation/widgets/NavigationBarBottom.dart';
 import 'package:beacon/presentation/widgets/FloatingVoiceButton.dart';
+import 'package:beacon/presentation/pages/chat.dart';
 
 import '../../viewmodels/ProfileViewModel.dart';
 import '../../viewmodels/p2p_viewmodel.dart';
@@ -23,33 +24,34 @@ class _ResourcesPageState extends State<ResourcesPage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<ResourcesViewModel>().init();
+      final vm = context.read<ResourcesViewModel>();
+      final p2pVM = context.read<P2PViewModel>();
+      vm.init();
+      p2pVM.onResourcesChanged = () {
+        if (mounted) vm.refresh();
+      };
     });
+  }
+
+  @override
+  void dispose() {
+    final p2pVM = context.read<P2PViewModel>();
+    p2pVM.onResourcesChanged = null;
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final vm = context.watch<ResourcesViewModel>();
-    final p2pVM = context.watch<P2PViewModel>();
-
-    final bool amIHost = p2pVM.isHost;
-    final String networkStatus = p2pVM.connectionStatus;
-    final int peerCount = p2pVM.peers.length;
-
-    debugPrint(
-      "Status: $networkStatus | isHost: $amIHost | peers: $peerCount",
-    );
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBarTop(title: "Resources"),
       bottomNavigationBar: const NavigationBarBottom(currentIndex: 2),
       floatingActionButton: Floatingvoicebutton(centre: false),
-
       body: Column(
         children: [
           _buildTabs(vm),
-
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
             child: ElevatedButton.icon(
@@ -76,7 +78,6 @@ class _ResourcesPageState extends State<ResourcesPage> {
               },
             ),
           ),
-
           Expanded(
             child: vm.isLoading
                 ? const Center(child: CircularProgressIndicator())
@@ -84,10 +85,8 @@ class _ResourcesPageState extends State<ResourcesPage> {
           ),
         ],
       ),
-      //floatingActionButton: Floatingvoicebutton(centre: false),
     );
   }
-
 
   Widget _buildTabs(ResourcesViewModel vm) {
     return Container(
@@ -95,7 +94,6 @@ class _ResourcesPageState extends State<ResourcesPage> {
       child: Row(
         children: List.generate(vm.tabs.length, (index) {
           final selected = vm.currentTab == index;
-
           return Expanded(
             child: InkWell(
               onTap: () => vm.changeTab(index),
@@ -109,7 +107,7 @@ class _ResourcesPageState extends State<ResourcesPage> {
                     ),
                   ),
                 ),
-                child: Column(  
+                child: Column(
                   children: [
                     Icon(
                       _tabIcon(index),
@@ -135,7 +133,6 @@ class _ResourcesPageState extends State<ResourcesPage> {
     );
   }
 
-
   Widget _buildList(ResourcesViewModel vm) {
     if (vm.filteredResources.isEmpty) {
       return const Center(
@@ -156,15 +153,15 @@ class _ResourcesPageState extends State<ResourcesPage> {
     );
   }
 
-
   Widget _buildCard(
       BuildContext context,
       ResourcesViewModel vm,
       Resource item,
       ) {
-
     final profile = context.watch<ProfileViewModel>();
-    final p2pvm = context.watch<P2PViewModel>();
+    final p2pVM = context.watch<P2PViewModel>();
+    final isMyResource = profile.owner == item.owner;
+    final isOther = item.resourceType == 'Other';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -180,32 +177,27 @@ class _ResourcesPageState extends State<ResourcesPage> {
           Row(
             children: [
               Icon(
-                profile.owner == item.owner
-                    ? Icons.person
-                    : Icons.volunteer_activism,
+                isMyResource ? Icons.person : Icons.volunteer_activism,
                 color: Colors.red,
                 size: 20,
               ),
               const SizedBox(width: 8),
-
               Expanded(
                 child: Text(
-                  profile.owner == item.owner
+                  isMyResource
                       ? 'My Resource'
-                      : 'From ${item.owner?.isNotEmpty == true ? item.owner! : 'Anonymous'}',
+                      : 'From ${item.owner.isNotEmpty ? item.owner : 'Anonymous'}',
                   style: const TextStyle(
                     color: Colors.red,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
               ),
-
-              if (profile.owner == item.owner)
+              if (isMyResource)
                 Row(
                   children: [
                     IconButton(
-                      icon: const Icon(Icons.edit,
-                          color: Colors.white, size: 20),
+                      icon: const Icon(Icons.edit, color: Colors.white, size: 20),
                       onPressed: () async {
                         final res = await Navigator.push(
                           context,
@@ -220,11 +212,10 @@ class _ResourcesPageState extends State<ResourcesPage> {
                       },
                     ),
                     IconButton(
-                      icon: const Icon(Icons.delete,
-                          color: Colors.white, size: 20),
+                      icon: const Icon(Icons.delete, color: Colors.white, size: 20),
                       onPressed: () {
                         vm.deleteResource(item.id);
-                        context.read<P2PViewModel>().broadcastDeleteResource(item.id);
+                        p2pVM.broadcastDeleteResource(item.id);
                       },
                     ),
                   ],
@@ -239,29 +230,86 @@ class _ResourcesPageState extends State<ResourcesPage> {
             style: const TextStyle(color: Colors.white, fontSize: 16),
           ),
 
-          const SizedBox(height: 8),
+          if (!isOther) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Quantity: ${item.quantity}',
+              style: const TextStyle(color: Colors.white70),
+            ),
+          ],
 
-          Text(
-            'Quantity: ${item.quantity}',
-            style: const TextStyle(color: Colors.white70),
-          ),
-
-          if (item.owner!= profile.owner) ...[
+          if (!isMyResource) ...[
             const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red.withOpacity(0.85),
-                  foregroundColor: Colors.white,
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red.withOpacity(0.85),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                    ),
+                    icon: const Icon(Icons.notifications_active, size: 18),
+                    label: const Text('Request', style: TextStyle(fontSize: 13)),
+                    onPressed: () {
+                      p2pVM.requestResource(item, profile.owner ?? '');
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Request sent to resource owner'),
+                          backgroundColor: Colors.red,
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                  ),
                 ),
-                icon: const Icon(Icons.send),
-                label: const Text('Request Resource'),
-                onPressed: () {
-                  p2pvm.requestResource(item, profile.owner ?? "ay7aga");
-                  debugPrint("++++++++++++++++++++++++ request resource ${profile.owner} +++++++++++++++++++");
-                },
-              ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.grey[800],
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                    ),
+                    icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                    label: const Text('Chat', style: TextStyle(fontSize: 13)),
+                    onPressed: () {
+                      final matched = p2pVM.peers.any(
+                            (p) =>
+                        (p2pVM.peerProfileNames[p.id] ?? p.username) ==
+                            item.owner,
+                      );
+
+                      if (!matched) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Owner is not currently connected'),
+                            backgroundColor: Colors.grey,
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                        return;
+                      }
+
+                      final peer = p2pVM.peers.firstWhere(
+                            (p) =>
+                        (p2pVM.peerProfileNames[p.id] ?? p.username) ==
+                            item.owner,
+                      );
+
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ChattingPage(
+                            target: peer,
+                            isHost: p2pVM.isHost,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
           ],
         ],
@@ -269,109 +317,10 @@ class _ResourcesPageState extends State<ResourcesPage> {
     );
   }
 
-
-  void _showRequestDialog(
-      BuildContext context,
-      ResourcesViewModel vm,
-      Resource resource,
-      ) {
-    final controller = TextEditingController();
-    final p2pVM = Provider.of<P2PViewModel>(context, listen: false);
-    final profile = Provider.of<ProfileViewModel>(context, listen: false);
-
-    showDialog(
-      context: context,
-      builder: (_) {
-        return Dialog(
-          backgroundColor: Colors.grey[900],
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Request Resource',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-
-                Text(
-                  resource.note,
-                  style: const TextStyle(color: Colors.white70),
-                ),
-
-                const SizedBox(height: 16),
-
-                TextField(
-                  controller: controller,
-                  maxLines: 3,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(
-                    hintText: 'Add a message (optional)',
-                    hintStyle: TextStyle(color: Colors.white38),
-                    enabledBorder: OutlineInputBorder(
-                      borderSide: BorderSide(color: Colors.red),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderSide:
-                      BorderSide(color: Colors.red, width: 2),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 20),
-
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () =>
-                            Navigator.pop(context),
-                        style: OutlinedButton.styleFrom(
-                          side:
-                          const BorderSide(color: Colors.grey),
-                        ),
-                        child: const Text(
-                          'Cancel',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red,
-                        ),
-                        onPressed: () {
-                          p2pVM.requestResource(resource, profile.owner);
-                          Navigator.pop(context);
-                        },
-                        child: const Text('Send'),
-                      ),
-                    ),
-                  ],
-                )
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-
   IconData _tabIcon(int i) {
     if (i == 0) return Icons.medical_services;
     if (i == 1) return Icons.home;
-    return Icons.fastfood;
+    if (i == 2) return Icons.fastfood;
+    return Icons.category_outlined;
   }
 }

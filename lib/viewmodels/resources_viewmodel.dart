@@ -11,13 +11,10 @@ class ResourcesViewModel extends ChangeNotifier {
   List<Resource> _allResources = [];
   bool isLoading = true;
 
-  final List<String> tabs = ['Medical', 'Shelter', 'Food'];
+  final List<String> tabs = ['Medical', 'Shelter', 'Food', 'Other'];
 
   List<Resource> get filteredResources =>
-      _allResources.where(
-            (e) => e.resourceType == tabs[currentTab],
-      ).toList();
-
+      _allResources.where((e) => e.resourceType == tabs[currentTab]).toList();
 
   List<Resource> get allResources => _allResources;
 

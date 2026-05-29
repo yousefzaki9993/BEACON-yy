@@ -26,16 +26,27 @@ class _AddOrEditResourcePageState extends State<AddOrEditResourcePage> {
 
   late String _selectedType;
   bool get _isEditing => widget.resource != null;
-  final List<String> _types = ['Medical', 'Shelter', 'Food'];
+  bool get _isOther => _selectedType == 'Other';
+
+  final List<String> _types = ['Medical', 'Shelter', 'Food', 'Other'];
 
   @override
   void initState() {
     super.initState();
     _selectedType = widget.resource?.resourceType ?? widget.resourceType;
     if (_isEditing) {
-      _quantityController.text = widget.resource!.quantity.toString();
+      if (!_isOther) {
+        _quantityController.text = widget.resource!.quantity.toString();
+      }
       _noteController.text = widget.resource!.note;
     }
+  }
+
+  @override
+  void dispose() {
+    _quantityController.dispose();
+    _noteController.dispose();
+    super.dispose();
   }
 
   InputDecoration _buildInputDecoration(String label, IconData icon) {
@@ -76,6 +87,7 @@ class _AddOrEditResourcePageState extends State<AddOrEditResourcePage> {
         backgroundColor: Colors.black,
         elevation: 0,
         centerTitle: true,
+        foregroundColor: Colors.white,
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
@@ -105,35 +117,52 @@ class _AddOrEditResourcePageState extends State<AddOrEditResourcePage> {
                 dropdownColor: const Color(0xFF1E1E1E),
                 style: const TextStyle(color: Colors.white, fontSize: 16),
                 decoration: _buildInputDecoration('Resource Type', Icons.category),
-                items: _types.map((type) => DropdownMenuItem(
+                items: _types
+                    .map((type) => DropdownMenuItem(
                   value: type,
                   child: Text(type),
-                )).toList(),
-                onChanged: _isEditing ? null : (value) => setState(() => _selectedType = value!),
-              ),
-
-              const SizedBox(height: 20),
-
-              TextFormField(
-                controller: _quantityController,
-                keyboardType: TextInputType.number,
-                style: const TextStyle(color: Colors.white),
-                decoration: _buildInputDecoration('Quantity', Icons.inventory_2),
-                validator: (v) {
-                  if (v == null || v.isEmpty) return 'Enter quantity';
-                  if (int.tryParse(v) == null) return 'Invalid number';
-                  return null;
+                ))
+                    .toList(),
+                onChanged: _isEditing
+                    ? null
+                    : (value) {
+                  if (value != null) {
+                    setState(() {
+                      _selectedType = value;
+                      if (_selectedType == 'Other') {
+                        _quantityController.clear();
+                      }
+                    });
+                  }
                 },
               ),
 
               const SizedBox(height: 20),
 
+              if (!_isOther) ...[
+                TextFormField(
+                  controller: _quantityController,
+                  keyboardType: TextInputType.number,
+                  style: const TextStyle(color: Colors.white),
+                  decoration:
+                  _buildInputDecoration('Quantity', Icons.inventory_2),
+                  validator: (v) {
+                    if (v == null || v.isEmpty) return 'Enter quantity';
+                    if (int.tryParse(v) == null) return 'Invalid number';
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 20),
+              ],
+
               TextFormField(
                 controller: _noteController,
                 maxLines: 4,
                 style: const TextStyle(color: Colors.white),
-                decoration: _buildInputDecoration('Additional Notes', Icons.description),
-                validator: (v) => v == null || v.isEmpty ? 'Enter note' : null,
+                decoration:
+                _buildInputDecoration('Notes', Icons.description),
+                validator: (v) =>
+                v == null || v.isEmpty ? 'Enter notes' : null,
               ),
 
               const SizedBox(height: 40),
@@ -157,7 +186,9 @@ class _AddOrEditResourcePageState extends State<AddOrEditResourcePage> {
                       isEditing: _isEditing,
                       old: widget.resource,
                       type: _selectedType,
-                      quantity: int.parse(_quantityController.text),
+                      quantity: _isOther
+                          ? 0
+                          : int.parse(_quantityController.text),
                       note: _noteController.text,
                     );
                     await p2pVM.sync_broadcast();
@@ -166,7 +197,10 @@ class _AddOrEditResourcePageState extends State<AddOrEditResourcePage> {
                   },
                   child: Text(
                     _isEditing ? 'UPDATE RESOURCE' : 'SAVE RESOURCE',
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 1.1),
+                    style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.1),
                   ),
                 ),
               ),

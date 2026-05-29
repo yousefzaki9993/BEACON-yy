@@ -56,6 +56,7 @@ class P2PViewModel extends ChangeNotifier {
   String owner = "";
 
   Future<void> Function()? onRequestProfileRebroadcast;
+  VoidCallback? onResourcesChanged;
 
   Future<void> initP2P(BuildContext context, bool newHost) async {
     if (isActive && !isHost && !newHost) return;
@@ -145,7 +146,19 @@ class P2PViewModel extends ChangeNotifier {
             "Network Update",
             "${leaver.username} has left the network.",
             'client_channel');
+
+        final leaverName = peerProfileNames[leaver.id] ?? leaver.username;
+        if (leaverName.isNotEmpty) {
+          await _resourceDao.deleteResourcesByOwner(leaverName);
+          await sendBroadcast("DELETE_OWNER|$leaverName");
+          onResourcesChanged?.call();
+          notifyListeners();
+        }
+
+        peerProfileImages.remove(leaver.id);
+        peerProfileNames.remove(leaver.id);
       }
+
       peers = list;
       notifyListeners();
     });
@@ -178,6 +191,12 @@ class P2PViewModel extends ChangeNotifier {
               msg.substring(4),
               'resource_channel');
         }
+
+      } else if (msg.startsWith("DELETE_OWNER|")) {
+        final ownerName = msg.substring(13);
+        await _resourceDao.deleteResourcesByOwner(ownerName);
+        onResourcesChanged?.call();
+        notifyListeners();
 
       } else if (msg.startsWith("REQPROFILE|")) {
         if (onRequestProfileRebroadcast != null) {
@@ -233,12 +252,14 @@ class P2PViewModel extends ChangeNotifier {
         for (final r in data) {
           await _resourceDao.upsertResource(Resource.fromMap(r));
         }
+        onResourcesChanged?.call();
         notifyListeners();
 
       } else if (msg.startsWith("DELETE_RES|")) {
         try {
           final int resourceId = int.parse(msg.substring(11));
           await _resourceDao.deleteResource(resourceId);
+          onResourcesChanged?.call();
           NotificationService.showAlert(
               "Resource Synced",
               "Resource has been deleted.",
@@ -490,6 +511,7 @@ class P2PViewModel extends ChangeNotifier {
     isHost = false;
     isConnecting = false;
     _keyReady = false;
+    _keyManagement.clearCache();
     _integrity.reset();
 
     _msgSub?.cancel();

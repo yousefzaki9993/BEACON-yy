@@ -19,7 +19,7 @@ class AddEditResourceViewModel extends ChangeNotifier {
     if (isEditing && old != null) {
       await _resourceDao.updateResource(
         old.copyWith(
-          quantity: quantity,
+          quantity: type == 'Other' ? 0 : quantity,
           note: note,
           status: 'available',
         ),
@@ -32,7 +32,7 @@ class AddEditResourceViewModel extends ChangeNotifier {
       final resource = Resource(
         id: newId,
         resourceType: type,
-        quantity: quantity,
+        quantity: type == 'Other' ? 0 : quantity,
         note: note,
         requesterId: "",
         owner: user?.name ?? "",
